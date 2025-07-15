@@ -35,6 +35,7 @@ app.use(express.json());
 app.get('/my-ip', async (req, res) => {
     try {
         const response = await axios.get('https://api64.ipify.org?format=json');
+        logger.info('Fetched public IP', { ip: response.data.ip });
         res.json(response.data); // { ip: "xxx.xxx.xxx.xxx" }
     } catch (error) {
         logger.error('Failed to fetch public IP address', { error: error.message });
@@ -210,18 +211,84 @@ app.post('/api/create-order', async (req, res) => {
     }
 });
 
-// New Tracking Endpoint
-app.get('/api/track/:awb', async (req, res) => {
+// Updated Tracking Endpoint (supports AWസ
+
+// Updated Tracking Endpoint (supports both AWB and Order ID)
+app.get('/api/track/:identifier', async (req, res) => {
     try {
-        const awb = req.params.awb;
-        if (!awb) {
-            logger.error('AWB number missing in tracking request');
-            return res.status(400).json({ success: false, error: 'AWB number is required' });
+        const identifier = req.params.identifier;
+        if (!identifier) {
+            logger.error('Identifier missing in tracking request');
+            return res.status(400).json({ success: false, error: 'AWB number or Order ID is required' });
         }
 
-        logger.info('Fetching tracking details for AWB', { awb });
+        if (shiprocketConfig.token === 'your-default-shiprocket-token-here') {
+            logger.error('Shiprocket token not configured in .env');
+            return res.status(500).json({ success: false, error: 'Shiprocket token not configured' });
+        }
 
-        const response = await axios.get(`${shiprocketConfig.apiUrl}/v1/external/courier/track/awb/${awb}`, {
+        logger.info('Fetching tracking details for identifier', { identifier });
+
+        let awbNumber = identifier;
+
+        // Check if identifier is likely an order ID (e.g., contains non-numeric characters or specific prefix)
+        if (!/^[0-9]+$/.test(identifier)) {
+            logger.info('Identifier appears to be an Order ID, fetching AWB', { identifier });
+            try {
+                const orderResponse = await axios.get(`${shiprocketConfig.apiUrl}/v1/external/orders/show/${identifier}`, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${shiprocketConfig.token}`
+                    },
+                    timeout: 10000
+                });
+
+                if (orderResponse.status !== 200 || !orderResponse.data.order) {
+                    logger.error('Failed to fetch order details from Shiprocket', {
+                        identifier,
+                        status: orderResponse.status,
+                        data: orderResponse.data
+                    });
+                    return res.status(orderResponse.status).json({
+                        success: false,
+                        error: orderResponse.data.message || 'Order ID not found'
+                    });
+                }
+
+                awbNumber = orderResponse.data.order.awb_code;
+                if (!awbNumber) {
+                    logger.error('No AWB number found for order', { identifier });
+                    return res.status(404).json({
+                        success: false,
+                        error: 'No AWB number associated with this Order ID'
+                    });
+                }
+                logger.info('Retrieved AWB number for order', { identifier, awbNumber });
+            } catch (error) {
+                logger.error('Error fetching order details', {
+                    identifier,
+                    error: error.message,
+                    response: error.response ? {
+                        status: error.response.status,
+                        data: error.response.data
+                    } : null
+                });
+                if (error.response && error.response.status === 401) {
+                    return res.status(401).json({
+                        success: false,
+                        error: 'Shiprocket authentication failed',
+                        details: 'Invalid or expired Shiprocket token'
+                    });
+                }
+                return res.status(400).json({
+                    success: false,
+                    error: error.response?.data?.message || 'Invalid Order ID or order not found'
+                });
+            }
+        }
+
+        // Fetch tracking details using AWB number
+        const response = await axios.get(`${shiprocketConfig.apiUrl}/v1/external/courier/track/awb/${awbNumber}`, {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${shiprocketConfig.token}`
@@ -229,19 +296,22 @@ app.get('/api/track/:awb', async (req, res) => {
             timeout: 10000
         });
 
+        logger.info('Shiprocket tracking API response', { identifier, awbNumber, status: response.status, data: response.data });
+
         if (response.status !== 200 || response.data.status_code !== 200) {
             logger.error('Failed to fetch tracking details from Shiprocket', {
-                awb,
+                identifier,
+                awbNumber,
                 status: response.status,
                 data: response.data
             });
-            return res.status(400).json({
+            return res.status(response.status).json({
                 success: false,
-                error: response.data.message || 'Unable to fetch tracking details'
+                error: response.data.message || 'Unable to fetch tracking details. Please check the AWB number or Order ID.'
             });
         }
 
-        logger.info('Tracking details fetched successfully', { awb, shipmentStatus: response.data.tracking_data.shipment_status });
+        logger.info('Tracking details fetched successfully', { identifier, awbNumber, shipmentStatus: response.data.tracking_data.shipment_status });
 
         res.status(200).json({
             success: true,
@@ -249,7 +319,7 @@ app.get('/api/track/:awb', async (req, res) => {
         });
     } catch (error) {
         logger.error('Error fetching tracking details', {
-            awb: req.params.awb,
+            identifier: req.params.identifier,
             error: error.message,
             response: error.response ? {
                 status: error.response.status,
@@ -269,7 +339,7 @@ app.get('/api/track/:awb', async (req, res) => {
             if (status === 404 || status === 422) {
                 return res.status(status).json({
                     success: false,
-                    error: data.message || 'Invalid AWB number or tracking data not found'
+                    error: data.message || 'Invalid AWB number or Order ID'
                 });
             }
         }
