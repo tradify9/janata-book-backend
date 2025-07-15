@@ -27,25 +27,37 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
-// Root route
-app.get('/', (req, res) => {
-  res.status(200).send('Server is running');
-});
 
 // Middleware to parse JSON bodies
 app.use(express.json());
 
-// Shiprocket API configuration
-const shiprocketConfig = {
-    token: process.env.SHIPROCKET_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjY5OTkwMzAsInNvdXJjZSI6InNyLWF1dGgtaW50IiwiZXhwIjoxNzUzMzQ3ODEyLCJqdGkiOiJKVEM1VU9qN1BqdmNLd1BHIiwiaWF0IjoxNzUyNDgzODEyLCJpc3MiOiJodHRwczovL3NyLWF1dGguc2hpcHJvY2tldC5pbi9hdXRob3JpemUvdXNlciIsIm5iZiI6MTc1MjQ4MzgxMiwiY2lkIjozNzA0OTkwLCJ0YyI6MzYwLCJ2ZXJib3NlIjpmYWxzZSwidmVuZG9yX2lkIjowLCJ2ZW5kb3JfY29kZSI6Indvb2NvbW1lcmNlIn0.fTkwxL7wJOFXWhsS-eHG7kTnsnWRGazZ5RdLwBZbnBk',
-    apiUrl: 'https://apiv2.shiprocket.in'
-};
+// ✅ Route to get public IP of server (for Shiprocket whitelisting)
+app.get('/my-ip', async (req, res) => {
+    try {
+        const response = await axios.get('https://api64.ipify.org?format=json');
+        res.json(response.data); // { ip: "xxx.xxx.xxx.xxx" }
+    } catch (error) {
+        logger.error('Failed to fetch public IP address', { error: error.message });
+        res.status(500).json({ error: 'Failed to fetch public IP' });
+    }
+});
+
+// Root route
+app.get('/', (req, res) => {
+    res.status(200).send('Server is running');
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
     logger.info('Health check endpoint called');
     res.status(200).json({ status: 'OK', message: 'Server is running' });
 });
+
+// Shiprocket API configuration
+const shiprocketConfig = {
+    token: process.env.SHIPROCKET_TOKEN || 'your-default-shiprocket-token-here',
+    apiUrl: 'https://apiv2.shiprocket.in'
+};
 
 // Endpoint to handle order creation
 app.post('/api/create-order', async (req, res) => {
@@ -61,7 +73,6 @@ app.post('/api/create-order', async (req, res) => {
             deliveryDays
         } = req.body;
 
-        // Validate required fields
         if (!orderId || !cart || !Array.isArray(cart) || cart.length === 0 || !formData || !paymentId) {
             logger.error('Invalid order data received', {
                 orderId,
@@ -73,20 +84,17 @@ app.post('/api/create-order', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Missing required order data' });
         }
 
-        // Validate formData fields
         if (!formData.name || !formData.email || !formData.phone || !formData.address || !formData.pincode || !formData.state) {
             logger.error('Incomplete form data', { formData });
             return res.status(400).json({ success: false, error: 'Incomplete shipping details' });
         }
 
-        // Validate cart items
         const invalidItem = cart.find(item => !item.id || !item.name || !Number.isFinite(item.price) || !Number.isFinite(item.quantity) || item.quantity <= 0);
         if (invalidItem) {
             logger.error('Invalid cart item detected', { invalidItem });
             return res.status(400).json({ success: false, error: 'Invalid cart item data' });
         }
 
-        // Validate totalAmount (allow positive or zero with warning)
         if (!Number.isFinite(totalAmount) || totalAmount < 0) {
             logger.error('Invalid total amount', { totalAmount });
             return res.status(400).json({ success: false, error: 'Total amount must be a valid non-negative number' });
@@ -95,7 +103,6 @@ app.post('/api/create-order', async (req, res) => {
             logger.warn('Total amount is zero, proceeding with warning', { orderId, totalAmount });
         }
 
-        // Prepare order items for Shiprocket
         const orderItems = cart.map(item => ({
             name: item.name,
             sku: `SKU-${item.id}`,
@@ -103,13 +110,11 @@ app.post('/api/create-order', async (req, res) => {
             selling_price: item.price,
             discount: 0,
             tax: 0,
-            hsn: '4901' // Assuming books
+            hsn: '4901' // Books
         }));
 
-        // Log cart details for debugging
         logger.info('Cart details', { cart, orderItems });
 
-        // Prepare Shiprocket payload
         const orderDate = new Date().toISOString().split('T')[0];
         const payload = {
             order_id: orderId,
@@ -143,15 +148,14 @@ app.post('/api/create-order', async (req, res) => {
             transaction_charges: 0,
             total_discount: couponDiscount || 0,
             sub_total: totalAmount,
-            length: 30, // Adjust as needed
+            length: 30,
             breadth: 20,
             height: 5,
-            weight: 0.5 * cart.reduce((sum, item) => sum + item.quantity, 0) // 0.5kg per book
+            weight: 0.5 * cart.reduce((sum, item) => sum + item.quantity, 0)
         };
 
         logger.info('Sending order to Shiprocket', { orderId, totalAmount, itemCount: cart.length, payload });
 
-        // Send request to Shiprocket API
         const response = await axios.post(
             `${shiprocketConfig.apiUrl}/v1/external/orders/create/adhoc`,
             payload,
@@ -160,13 +164,12 @@ app.post('/api/create-order', async (req, res) => {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${shiprocketConfig.token}`
                 },
-                timeout: 10000 // 10-second timeout
+                timeout: 10000
             }
         );
 
         logger.info('Shiprocket order created successfully', { orderId, shiprocketOrderId: response.data.order_id });
 
-        // Return success response with Shiprocket order ID
         res.json({
             success: true,
             shiprocketOrderId: response.data.order_id,
@@ -181,7 +184,6 @@ app.post('/api/create-order', async (req, res) => {
             } : null
         });
 
-        // Handle specific Shiprocket errors
         if (error.response) {
             const { status, data } = error.response;
             if (status === 401) {
@@ -200,7 +202,6 @@ app.post('/api/create-order', async (req, res) => {
             }
         }
 
-        // General error response
         res.status(500).json({
             success: false,
             error: 'Failed to create order in Shiprocket',
@@ -209,7 +210,7 @@ app.post('/api/create-order', async (req, res) => {
     }
 });
 
-// Error handling middleware
+// Global error handler
 app.use((err, req, res, next) => {
     logger.error('Server error', { error: err.message, stack: err.stack });
     res.status(500).json({
